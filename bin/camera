@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+
+""" Home Monitoring Process
+
+    This is designed to run on Raspberry Pi Model B (2 and higher) and a NFS storage.
+"""
+import datetime
+import json
+import os
+import logging
+import subprocess
+import sys
+import time
+
+import picamera as p
+
+min_wait_time   = 3 # seconds
+min_warmup_time = 0 # seconds
+in_debug_mode   = False
+
+standby_time_on_stopper = 600 # 10 minutes in seconds
+
+config_filepath   = '/pi/config/camera.json'
+log_filepath      = '/pi/logs/monitoring.log'
+latest_photo_path = '/pi/records/latest.jpg'
+stopper_file      = '/pi/nophoto'
+record_dir        = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'records'))
+save_dir_pattern  = '%Y/%m/%d'
+save_name_pattern = '%Y%m%d-%H%M.%S'
+
+resolution_map = {
+    'full':  (2592, 1944),
+    '1080p': (1920, 1080),
+    '720p':  (1296, 730),
+    'half':  (1296, 972),
+    'default': (720, 480),
+}
+
+def now():
+    return datetime.datetime.utcnow()
+
+def take_photo(c, when, warmup_time, quality):
+    if warmup_time:
+        # To warm up the camera...
+        time.sleep(warmup_time)
+
+    start_time = time.time()
+
+    save_dir = os.path.join(
+        record_dir,
+        when.strftime(save_dir_pattern)
+    )
+
+    save_name = when.strftime(save_name_pattern)
+
+    if not os.path.exists(save_dir):
+        subprocess.call(['mkdir', '-p', save_dir])
+
+    # Capture a still image.
+    if quality in resolution_map:
+        c.resolution = resolution_map[quality]
+
+    file_name = os.path.join(save_dir, '{}.jpg'.format(save_name))
+
+    c.capture(file_name)
+
+    # Replace the latest image.
+    subprocess.call('cp {} {} &'.format(file_name, latest_photo_path), shell = True)
+
+    return time.time() - start_time
+
+def activate(when, delay, quality, camera = None):
+    warmup_time = min_warmup_time
+
+    if delay:
+        if delay > min_warmup_time:
+            time.sleep(delay - min_warmup_time)
+        else:
+            # The delay will be part of the warmup.
+            warmup_time = delay
+
+    if not camera:
+        with p.PiCamera() as c:
+            return take_photo(c, when, warmup_time, quality)
+
+    return take_photo(camera, when, warmup_time, quality)
+
+def get_freq_label(freq_map, hour_int):
+    for label in freq_map:
+        freq_range = freq_map[label]
+
+        if freq_range[0] <= hour_int < freq_range[1]:
+            return label
+
+    return None
+
+def get_execution_mode(mode_config, dt_int):
+    for mode in mode_config:
+        for p in mode['periods']:
+            if p[0] <= dt_int <= p[1]:
+                return mode
+
+    return mode # default mode
+
+def get_seconds_until_next_hour():
+    dt_now = now()
+
+    minute_int = int(dt_now.strftime('%M'))
+    second_int = int(dt_now.strftime('%S'))
+
+    return minute_int * 60 + second_int
+
+def dump_loop_data(mode, freq_label, duration, wait, delay):
+    mode_id = mode['id'] if isinstance(mode, dict) else mode
+
+    print('=' * 25)
+    print('| Mode:      {}'.format(mode_id))
+    print('| Frequency: {}'.format(freq_label))
+    print('| Remaining: {}s'.format(duration))
+    print('| Wait Time: {}s'.format(wait))
+    print('| Delay:     {:.3f}s'.format(delay))
+    print('=' * 25)
+
+def log(mode, frequency, message, level = 'info'):
+    level = level.lower()
+    mode_id = mode['id'] if isinstance(mode, dict) else mode
+
+    getattr(logging, level)('{}/{}: {}'.format(mode_id, frequency, message))
+
+def main(args, camera = None):
+    global in_debug_mode
+
+    in_debug_mode   = '-d' in args
+    in_forever_mode = '-f' in args
+    in_cron_mode    = '-c' in args
+
+    logging.basicConfig(
+        format   = '%(levelname)s %(asctime)s %(name)s: %(message)s',
+        filename = log_filepath,
+        level    = logging.DEBUG if in_debug_mode else logging.INFO
+    )
+
+    with open(config_filepath, 'r') as f:
+        config = json.load(f)
+
+    if in_cron_mode or in_forever_mode:
+        logging.info('Running in the {} mode...'.format('CRON' if in_cron_mode else 'FOREVER'))
+
+        duration = config['cron']['duration'] if in_cron_mode else None
+
+        prev_exec_mode = None
+        prev_frequency = None
+
+        offset = 0
+
+        intentional_stop_detected = False
+
+        while True:
+            dt_now = now()
+
+            dt_str   = dt_now.strftime('%Y.%m.%d %H:%M:%S')
+            dt_int   = int(dt_now.strftime('%Y%m%d'))
+            hour_int = int(dt_now.strftime('%H')) + config['timezone']
+
+            freq_label = get_freq_label(config['hours'], hour_int)
+            exec_mode  = get_execution_mode(config['modes'], dt_int)
+            frequency  = config['normal']['frequency']
+            quality    = config['normal']['quality']
+
+            if exec_mode:
+                frequency = exec_mode['frequency']
+                quality   = exec_mode['quality']
+
+            wait = frequency[freq_label]['wait']
+
+            if prev_exec_mode != exec_mode['id']:
+                log(
+                    exec_mode,
+                    freq_label,
+                    'Switched the execution mode from {}'.format(prev_exec_mode)
+                )
+
+                prev_exec_mode = exec_mode['id']
+
+            if prev_frequency != freq_label:
+                log(
+                    exec_mode,
+                    freq_label,
+                    'Switched the frequency from {}'.format(prev_frequency)
+                )
+
+                prev_frequency = freq_label
+
+            if not freq_label or freq_label not in frequency:
+                seconds_until_next_hour = get_seconds_until_next_hour()
+
+                log(
+                    exec_mode,
+                    freq_label,
+                    'No frequency setting for this hour. Resume in {}s...'.format(seconds_until_next_hour),
+                    level = 'warning'
+                )
+
+                intentional_stop_detected = True
+
+                time.sleep(seconds_until_next_hour)
+
+                continue
+
+            if os.path.exists(stopper_file):
+                log(
+                    exec_mode,
+                    freq_label,
+                    'Detected the stopper file. Resume in {}s...'.format(standby_time_on_stopper),
+                    level = 'warning'
+                )
+
+                intentional_stop_detected = True
+
+                time.sleep(standby_time_on_stopper)
+
+                continue
+
+            if intentional_stop_detected:
+                intentional_stop_detected = False
+
+                log(
+                    exec_mode,
+                    freq_label,
+                    'Resume the operation.',
+                    level = 'info'
+                )
+
+            if wait < 1:
+                seconds_until_next_hour = get_seconds_until_next_hour()
+
+                log(
+                    exec_mode,
+                    freq_label,
+                    'Disabled by configuration for this period. Will try again in {}s'.format(seconds_until_next_hour),
+                    level = 'warning'
+                )
+
+                intentional_stop_detected = True
+
+                time.sleep(seconds_until_next_hour)
+
+            if wait < min_wait_time:
+                wait = min_wait_time
+
+            delay = wait - offset if wait > offset else 0
+
+            if in_cron_mode:
+                if duration - wait < 0:
+                    log(exec_mode, freq_label, 'Not enough time for the next iteration', level = 'warning')
+
+                    dump_loop_data(exec_mode, freq_label, duration, wait, delay)
+
+                    break
+
+                duration -= wait
+
+            if in_debug_mode:
+                dump_loop_data(exec_mode, freq_label, duration, wait, delay)
+
+            offset = activate(dt_now, delay, quality, camera)
+
+            if in_debug_mode:
+                log(exec_mode, freq_label, 'Processing Time: {:.3f}s'.format(offset), level = 'debug')
+
+    else:
+        wait = config['normal']['standby']
+
+        offset = activate(now(), wait, 'full', camera)
+
+        if in_debug_mode:
+            dump_loop_data('manual', 'normal', None, wait, 0)
+            log('manual', 'normal', 'Processing Time: {:.3f}s'.format(offset), level = 'debug')
+
+if __name__ == '__main__':
+    try:
+        with p.PiCamera() as c:
+            min_wait_time = 1
+
+            try:
+                c.led = False
+            except p.exc.PiCameraRuntimeError as e:
+                log('interface', 'single', 'Failed to disable LED as GPIO is not installed.', level = 'warning')
+                pass
+
+            main(sys.argv[1:], c)
+
+    except KeyboardInterrupt as e:
+        log('interface', 'single', 'Terminated by the user.', level = 'warning')
+
+    print('Done!')

@@ -1,0 +1,99 @@
+{
+    "_comment": "The timezone is UTC but adjusted to EST/EDT.",
+    "timezone": -4,
+    "hours": {
+        "dawn":      [ 0,  6],
+        "morning":   [ 6, 10],
+        "afternoon": [10, 17],
+        "evening":   [17, 19],
+        "night":     [19, 23]
+    },
+    "cron": {
+        "duration": 3600
+    },
+    "normal": {
+        "standby": 2,
+        "quality": "default",
+        "frequency": {
+            "afternoon": {
+                "wait": 5
+            },
+            "evening": {
+                "wait": 15
+            },
+            "night": {
+                "wait": 0
+            },
+            "dawn": {
+                "wait": 0
+            },
+            "morning": {
+                "wait": 900
+            }
+        }
+    },
+    "modes": [
+        {
+            "id":      "high_alert",
+            "quality": "default",
+            "periods": [
+                /*
+                    Syntax: [from, to]
+
+                    "from" and "to" must be integers for dates in
+                    the pattern YYYYMMDD.
+
+                    Example: [20160321, 20160422]
+                 */  
+            ],
+            "frequency": {
+                "afternoon": {
+                    "wait": 1.5
+                },
+                "evening": {
+                    "wait": 5
+                },
+                "night": {
+                    "wait": 600
+                },
+                "dawn": {
+                    "wait": 600
+                },
+                "morning": {
+                    "wait": 900
+                }
+            }
+        },
+        {
+            "id":      "holiday",
+            "quality": "default",
+            "periods": [
+                /*
+                    Syntax: [from, to]
+
+                    "from" and "to" must be integers for dates in
+                    the pattern YYYYMMDD.
+
+                    Example: [20160321, 20160422]
+                 */  
+            ],
+            "frequency": {
+                "afternoon": {
+                    "wait": 2
+                },
+                "evening": {
+                    "wait": 10
+                },
+                "night": {
+                    "wait": 600
+                },
+                "dawn": {
+                    "wait": 600
+                },
+                "morning": {
+                    "wait": 900
+                }
+            }
+        }
+    ]
+}
